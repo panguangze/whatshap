@@ -4,14 +4,7 @@ from typing import Dict
 
 from math import log
 
-from networkx import (
-    Graph,
-    number_of_nodes,
-    number_of_edges,
-    connected_components,
-    node_connected_component,
-    shortest_path,
-)
+import networkx as nx
 from whatshap.core import Read, ReadSet
 
 logger = logging.getLogger(__name__)
@@ -25,6 +18,20 @@ class ReadMergerBase(ABC):
 
 class ReadMerger(ReadMergerBase):
     def __init__(self, error_rate, max_error_rate, positive_threshold, negative_threshold):
+        """
+        error_rate -- the probability that a nucleotide is wrong
+
+        max_error_rate -- the maximum error rate of any edge of the read
+        merging graph allowed before we discard it
+
+        threshold -- the threshold of the ratio between the probabilities
+        that a pair of reads come from the same haplotype and different
+        haplotypes
+
+        negative_threshold -- The threshold of the ratio between the
+        probabilities that a pair of reads come from the same haplotype
+        and different haplotypes.
+        """
         self._error_rate = error_rate
         self._max_error_rate = max_error_rate
         self._positive_threshold = positive_threshold
@@ -38,19 +45,6 @@ class ReadMerger(ReadMergerBase):
         together on one haplotype and on opposite haplotypes.
 
         readset -- the input .core.ReadSet object
-
-        error_rate -- the probability that a nucleotide is wrong
-
-        max_error_rate -- the maximum error rate of any edge of the read
-        merging graph allowed before we discard it
-
-        threshold -- the threshold of the ratio between the probabilities
-        that a pair of reads come from the same haplotype and different
-        haplotypes
-
-        neg_threshold -- The threshold of the ratio between the
-        probabilities that a pair of reads come from the same haplotype
-        and different haplotypes.
         """
         logger.info(
             "Merging %d reads with error rate %.2f, maximum error rate %.2f, "
@@ -62,10 +56,8 @@ class ReadMerger(ReadMergerBase):
             self._negative_threshold,
         )
         logger.debug("Merging started.")
-        gblue = Graph()
-        gred = Graph()
-        gnotblue = Graph()
-        gnotred = Graph()
+        gblue = nx.Graph()
+        gnotblue = nx.Graph()
 
         # Probability that any nucleotide is wrong
         error_rate = self._error_rate
@@ -90,13 +82,18 @@ class ReadMerger(ReadMergerBase):
         logger.debug("Thr. Diff.: %s - Thr. Neg. Diff.: %s", thr_diff, thr_neg_diff)
 
         logger.debug("Start reading the reads...")
+
+        # Create two graphs in which the nodes are reads and edges are added between nodes if
+        # the corresponding reads are similar or dissimilar in certain ways
+        # - blue graph:
+        # - not blue graph:
+
         id = 0
         orig_reads = {}
         queue = {}
         reads = {}
         for read in readset:
             id += 1
-            begin_str = read[0].position
             snps = []
             orgn = []
             for variant in read:
@@ -105,23 +102,23 @@ class ReadMerger(ReadMergerBase):
                 qual = variant.quality
 
                 orgn.append([str(site), str(zyg), str(qual)])
-                if int(zyg) == 0:
+                if zyg == 0:
                     snps.append("G")
                 else:
                     snps.append("C")
 
-            begin = int(begin_str)
+            begin = read[0].position
             end = begin + len(snps)
             orig_reads[id] = orgn
 
             gblue.add_node(id, begin=begin, end=end, sites="".join(snps))
             gnotblue.add_node(id, begin=begin, end=end, sites="".join(snps))
-            gred.add_node(id, begin=begin, end=end, sites="".join(snps))
-            gnotred.add_node(id, begin=begin, end=end, sites="".join(snps))
             queue[id] = {"begin": begin, "end": end, "sites": snps}
             reads[id] = {"begin": begin, "end": end, "sites": snps}
-            for x in [id for id in queue.keys() if queue[id]["end"] <= begin]:  # type: ignore
-                del queue[x]
+            for qid in queue.keys():
+                if queue[id]["end"] <= begin:  # type: ignore
+                    assert False
+                    del queue[qid]
             for id1 in queue.keys():
                 if id == id1:
                     continue
@@ -132,10 +129,6 @@ class ReadMerger(ReadMergerBase):
                     and match - mismatch >= thr_diff
                 ):
                     gblue.add_edge(id1, id, match=match, mismatch=mismatch)
-                    if mismatch - match >= thr_diff:
-                        gred.add_edge(id1, id, match=match, mismatch=mismatch)
-                    if match - mismatch >= thr_neg_diff:
-                        gnotred.add_edge(id1, id, match=match, mismatch=mismatch)
                     if mismatch - match >= thr_neg_diff:
                         gnotblue.add_edge(id1, id, match=match, mismatch=mismatch)
 
@@ -144,30 +137,16 @@ class ReadMerger(ReadMergerBase):
         logger.debug("Blue Graph")
         logger.debug(
             "Nodes: %s - Edges: %s - ConnComp: %s",
-            number_of_nodes(gblue),
-            number_of_edges(gblue),
-            len(list(connected_components(gblue))),
+            nx.number_of_nodes(gblue),
+            nx.number_of_edges(gblue),
+            len(list(nx.connected_components(gblue))),
         )
         logger.debug("Non-Blue Graph")
         logger.debug(
             "Nodes: %s - Edges: %s - ConnComp: %s",
-            number_of_nodes(gnotblue),
-            number_of_edges(gnotblue),
-            len(list(connected_components(gnotblue))),
-        )
-        logger.debug("Red Graph")
-        logger.debug(
-            "Nodes: %s - Edges: %s - ConnComp: %s",
-            number_of_nodes(gred),
-            number_of_edges(gred),
-            len(list(connected_components(gred))),
-        )
-        logger.debug("Non-Red Graph")
-        logger.debug(
-            "Nodes: %s - Edges: %s - ConnComp: %s",
-            number_of_nodes(gnotred),
-            number_of_edges(gnotred),
-            len(list(connected_components(gnotred))),
+            nx.number_of_nodes(gnotblue),
+            nx.number_of_edges(gnotblue),
+            len(list(nx.connected_components(gnotblue))),
         )
 
         # We consider the notblue edges as an evidence that two reads
@@ -179,7 +158,7 @@ class ReadMerger(ReadMergerBase):
 
         blue_component = {}
         current_component = 0
-        for conncomp in connected_components(gblue):
+        for conncomp in nx.connected_components(gblue):
             for v in conncomp:
                 blue_component[v] = current_component
             current_component += 1
@@ -190,8 +169,8 @@ class ReadMerger(ReadMergerBase):
         ]
 
         for (u, v) in good_notblue_edges:
-            while v in node_connected_component(gblue, u):
-                path = shortest_path(gblue, source=u, target=v)
+            while v in nx.node_connected_component(gblue, u):
+                path = nx.shortest_path(gblue, source=u, target=v)
                 # Remove the edge with the smallest support
                 # A better strategy is to weight each edge with -log p
                 # and remove the minimum (u,v)-cut
@@ -206,7 +185,7 @@ class ReadMerger(ReadMergerBase):
         superreads: Dict = {}  # superreads given by the clusters (if clustering)
         rep = {}  # cluster representative of a read in a cluster
 
-        for cc in connected_components(gblue):
+        for cc in nx.connected_components(gblue):
             if len(cc) > 1:
                 r = min(cc)
                 superreads[r] = {}
