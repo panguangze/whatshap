@@ -88,12 +88,10 @@ class ReadMerger(ReadMergerBase):
         # - blue graph:
         # - not blue graph:
 
-        id = 0
-        orig_reads = {}
+        orig_reads = []
         queue = {}
         reads = {}
-        for read in readset:
-            id += 1
+        for i, read in enumerate(readset):
             snps = []
             orgn = []
             for variant in read:
@@ -101,39 +99,37 @@ class ReadMerger(ReadMergerBase):
                 zyg = variant.allele
                 qual = variant.quality
 
-                orgn.append([str(site), str(zyg), str(qual)])
-                if zyg == 0:
-                    snps.append("G")
-                else:
-                    snps.append("C")
+                orgn.append((site, zyg, qual))
+                assert zyg in (0, 1)
+                snps.append(zyg)
 
             begin = read[0].position
             end = begin + len(snps)
-            orig_reads[id] = orgn
+            orig_reads.append(orgn)
 
-            gblue.add_node(id, begin=begin, end=end, sites="".join(snps))
-            gnotblue.add_node(id, begin=begin, end=end, sites="".join(snps))
-            queue[id] = {"begin": begin, "end": end, "sites": snps}
-            reads[id] = {"begin": begin, "end": end, "sites": snps}
+            gblue.add_node(i, begin=begin, end=end)
+            gnotblue.add_node(i, begin=begin, end=end)
+            queue[i] = {"begin": begin, "end": end, "sites": snps}
+            reads[i] = {"begin": begin, "end": end, "sites": snps}
             for qid in queue.keys():
-                if queue[id]["end"] <= begin:  # type: ignore
+                if queue[i]["end"] <= begin:  # type: ignore
                     assert False
                     del queue[qid]
-            for id1 in queue.keys():
-                if id == id1:
+            for j in queue.keys():
+                if i == j:
                     continue
-                match, mismatch = eval_overlap(queue[id1], queue[id])
+                match, mismatch = eval_overlap(queue[j], queue[i])
                 if (
                     match + mismatch >= thr_neg_diff
                     and min(match, mismatch) / (match + mismatch) <= max_error_rate
                     and match - mismatch >= thr_diff
                 ):
-                    gblue.add_edge(id1, id, match=match, mismatch=mismatch)
+                    gblue.add_edge(j, i, match=match, mismatch=mismatch)
                     if mismatch - match >= thr_neg_diff:
-                        gnotblue.add_edge(id1, id, match=match, mismatch=mismatch)
+                        gnotblue.add_edge(j, i, match=match, mismatch=mismatch)
 
         logger.debug("Finished reading the reads.")
-        logger.debug("Number of reads: %s", id)
+        logger.debug("Number of reads: %s", i)
         logger.debug("Blue Graph")
         logger.debug(
             "Nodes: %s - Edges: %s - ConnComp: %s",
@@ -163,12 +159,10 @@ class ReadMerger(ReadMergerBase):
                 blue_component[v] = current_component
             current_component += 1
 
-        # Keep only the notblue edges that are inside a blue connected component
-        good_notblue_edges = [
-            (v, w) for (v, w) in gnotblue.edges() if blue_component[v] == blue_component[w]
-        ]
-
-        for (u, v) in good_notblue_edges:
+        for (u, v) in gnotblue.edges():
+            if blue_component[u] != blue_component[v]:
+                # Keep only the notblue edges that are inside a blue connected component
+                continue
             while v in nx.node_connected_component(gblue, u):
                 path = nx.shortest_path(gblue, source=u, target=v)
                 # Remove the edge with the smallest support
@@ -183,35 +177,30 @@ class ReadMerger(ReadMergerBase):
         # Merge blue components (somehow)
         logger.debug("Started Merging Reads...")
         superreads: Dict = {}  # superreads given by the clusters (if clustering)
-        rep = {}  # cluster representative of a read in a cluster
+        representative = {}  # cluster representative of a read in a cluster
 
         for cc in nx.connected_components(gblue):
             if len(cc) > 1:
                 r = min(cc)
                 superreads[r] = {}
-                for id in cc:
-                    rep[id] = r
+                for i in cc:
+                    representative[i] = r
 
-        for id in orig_reads:
-            if id in rep:
-                for tok in orig_reads[id]:
-                    site = int(tok[0])
-                    zyg = int(tok[1])
-                    qual = int(tok[2])
-                    r = rep[id]
+        for i in range(len(orig_reads)):
+            if i in representative:
+                for site, zyg, qual in orig_reads[i]:
+                    r = representative[i]
                     if site not in superreads[r]:
                         superreads[r][site] = [0, 0]
                     superreads[r][site][zyg] += qual
 
             merged_reads = ReadSet()
-            readn = 0
-            for id in orig_reads:
-                read = Read("read" + str(readn))
-                readn += 1
-                if id in rep:
-                    if id == rep[id]:
-                        for site in sorted(superreads[id]):
-                            z = superreads[id][site]
+            for i, _ in enumerate(orig_reads):
+                read = Read(f"read{i}")
+                if i in representative:
+                    if i == representative[i]:
+                        for site in sorted(superreads[i]):
+                            z = superreads[i][site]
                             if z[0] >= z[1]:
                                 read.add_variant(site, 0, z[0] - z[1])
 
@@ -219,8 +208,8 @@ class ReadMerger(ReadMergerBase):
                                 read.add_variant(site, 1, z[1] - z[0])
                         merged_reads.add(read)
                 else:
-                    for tok in orig_reads[id]:
-                        read.add_variant(int(tok[0]), int(tok[1]), int(tok[2]))
+                    for site, zyg, qual in orig_reads[i]:
+                        read.add_variant(site, zyg, qual)
                     merged_reads.add(read)
 
         logger.debug("Finished merging reads.")
@@ -243,11 +232,10 @@ def eval_overlap(n1, n2):
     """
     hang1 = n2["begin"] - n1["begin"]
     overlap = zip(n1["sites"][hang1:], n2["sites"])
-    match, mismatch = (0, 0)
+    match = mismatch = 0
     for (c1, c2) in overlap:
-        if c1 in ["A", "C", "G", "T"] and c2 in ["A", "C", "G", "T"]:
-            if c1 == c2:
-                match += 1
-            else:
-                mismatch += 1
-    return (match, mismatch)
+        if c1 == c2:
+            match += 1
+        else:
+            mismatch += 1
+    return match, mismatch
