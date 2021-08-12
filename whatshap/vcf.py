@@ -312,10 +312,10 @@ class VariantTable:
                 continue
             if variant not in input_variant_set:
                 continue
-            if genotype.is_homozygous():
-                continue
-            if phase is None:
-                continue
+            # if genotype.is_homozygous():
+            #     continue
+            # if phase is None:
+            #     continue
             if phase.quality is None:
                 quality = default_quality
             else:

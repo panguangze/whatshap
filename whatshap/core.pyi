@@ -58,7 +58,6 @@ class PedigreeDPTable:
         readset: ReadSet,
         recombcost: int,
         pedigree: Pedigree,
-        distrust_genotypes: bool = ...,
         positions: Optional[Iterable[int]] = ...,
     ): ...
     def get_super_reads(self) -> Tuple[List[ReadSet], List[int]]: ...
