@@ -306,7 +306,8 @@ class VariantTable:
         )
         for variant, genotype, phase in zip(
             self.variants, self.genotypes[sample_index], self.phases[sample_index]
-        ):
+        ):  
+            homo = False
             if len(genotype.as_vector()) > 2:
                 # only use diploid variants
                 continue
@@ -314,8 +315,10 @@ class VariantTable:
                 continue
             # if genotype.is_homozygous():
             #     continue
-            # if phase is None:
-            #     continue
+            if phase is None and not genotype.is_homozygous():
+                continue
+            if genotype.is_homozygous():
+                homo = True
             if phase.quality is None:
                 quality = default_quality
             else:
